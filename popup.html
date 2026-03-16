@@ -1,0 +1,83 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tab Group Organizer</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="logo">
+      <span class="logo-icon">&#x229E;</span>
+      <span class="logo-text">Tab Group Organizer</span>
+    </div>
+    <label class="toggle" title="Enable / Disable auto-grouping">
+      <input type="checkbox" id="toggleEnabled" />
+      <span class="slider"></span>
+    </label>
+  </header>
+
+  <div id="statusBadge" class="badge badge--on">&#9679; Auto-grouping ON</div>
+
+  <button id="btnOrganize" class="btn btn--primary">&#x27F3; &nbsp;Organize Tabs Now</button>
+
+  <button id="btnCollapseToggle" class="btn btn--secondary">&#x229F; &nbsp;Collapse All Groups</button>
+
+  <hr />
+
+  <section class="settings">
+    <h2 class="section-title">Settings</h2>
+
+    <label class="row">
+      <span class="row__label">
+        Auto-collapse groups
+        <small>Collapse all groups except the one you are currently in</small>
+      </span>
+      <label class="toggle small">
+        <input type="checkbox" id="toggleAutoCollapse" />
+        <span class="slider"></span>
+      </label>
+    </label>
+
+    <label class="row">
+      <span class="row__label">
+        Move active group to end
+        <small>When you switch tabs, move that group to the end of the tab bar</small>
+      </span>
+      <label class="toggle small">
+        <input type="checkbox" id="toggleMoveActiveToEnd" />
+        <span class="slider"></span>
+      </label>
+    </label>
+
+    <label class="row">
+      <span class="row__label">
+        Leave single-tab domains ungrouped
+        <small>Do not create a group when only 1 tab exists for a domain</small>
+      </span>
+      <label class="toggle small">
+        <input type="checkbox" id="toggleUngroupSingles" />
+        <span class="slider"></span>
+      </label>
+    </label>
+  </section>
+
+  <section class="settings">
+    <h2 class="section-title">Excluded Domains</h2>
+    <p class="hint">Tabs from these domains will not be grouped.</p>
+    <div class="domain-input-row">
+      <input type="text" id="domainInput" class="input"
+        placeholder="example.com" autocomplete="off" spellcheck="false" />
+      <button id="btnAddDomain" class="btn btn--small">Add</button>
+    </div>
+    <ul id="excludedList" class="excluded-list"></ul>
+  </section>
+
+  <footer>v1.0.0</footer>
+</div>
+<script src="popup.js"></script>
+</body>
+</html>
