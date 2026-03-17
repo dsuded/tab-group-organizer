@@ -1,5 +1,5 @@
 ﻿// ============================================================
-//  Tab Group Organizer - Background Service Worker
+//  Tab Group Organizer — Background Service Worker
 // ============================================================
 
 const GROUP_COLORS = [
@@ -16,7 +16,7 @@ let isOrganizing    = false;
 let debounceTimer   = null;
 let activeMoveTimer = null;
 
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Helpers ──────────────────────────────────────────────────
 
 function getMainDomain(url) {
   try {
@@ -48,7 +48,7 @@ function colorForDomain(domain) {
   return GROUP_COLORS[Math.abs(hash) % GROUP_COLORS.length];
 }
 
-// â”€â”€ Core organizer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Core organizer ───────────────────────────────────────────
 
 async function organizeTabs() {
   if (isOrganizing) return;
@@ -72,14 +72,17 @@ async function organizeWindow(windowId) {
   const {
     ungroupSingles  = false,
     excludedDomains = [],
-    autoCollapse    = false
+    autoCollapse    = false,
+    moveActiveToEnd = false
   } = await chrome.storage.sync.get([
-    "ungroupSingles", "excludedDomains", "autoCollapse"
+    "ungroupSingles", "excludedDomains", "autoCollapse", "moveActiveToEnd"
   ]);
 
+  // ── 1. Fetch tabs ─────────────────────────────────────────
   const allTabs = await chrome.tabs.query({ windowId });
   const tabs    = allTabs.filter(t => !t.pinned);
 
+  // ── 2. Build domain map ───────────────────────────────────
   const domainMap = new Map();
   const skipTabs  = [];
 
@@ -100,6 +103,7 @@ async function organizeWindow(windowId) {
     }
   }
 
+  // ── 3. Snapshot existing groups ───────────────────────────
   const existingGroups = await chrome.tabGroups.query({ windowId });
   const titleToId = new Map();
   for (const g of existingGroups) {
@@ -107,11 +111,33 @@ async function organizeWindow(windowId) {
       titleToId.set(g.title.toLowerCase(), g.id);
   }
 
+  // ── 4. EXPAND all groups before touching any tabs ─────────
+  // Moving tabs that belong to a collapsed group can silently
+  // ungroup them. We expand everything here so all subsequent
+  // operations (group, sort, move) are safe. autoCollapse at
+  // the very end of this function restores the correct state.
+  for (const g of existingGroups) {
+    if (g.collapsed) {
+      try { await chrome.tabGroups.update(g.id, { collapsed: false }); } catch {}
+    }
+  }
+
+  // ── 5. Assign tabs to groups ──────────────────────────────
   for (const [domain, domainTabs] of domainMap) {
-    const tabIds = domainTabs.map(t => t.id);
+    const tabIds  = domainTabs.map(t => t.id);
+    let   grouped = false;
+
     if (titleToId.has(domain)) {
-      await chrome.tabs.group({ tabIds, groupId: titleToId.get(domain) });
-    } else {
+      try {
+        await chrome.tabs.group({ tabIds, groupId: titleToId.get(domain) });
+        grouped = true;
+      } catch {
+        // Stale groupId (group was deleted) — create a fresh one below
+        titleToId.delete(domain);
+      }
+    }
+
+    if (!grouped) {
       const groupId = await chrome.tabs.group({ tabIds });
       await chrome.tabGroups.update(groupId, {
         title: domain.toUpperCase(),
@@ -121,16 +147,35 @@ async function organizeWindow(windowId) {
     }
   }
 
+  // ── 6. Ungroup excluded / special tabs ────────────────────
   for (const tab of skipTabs) {
     if (tab.groupId !== undefined && tab.groupId !== -1) {
-      try { await chrome.tabs.ungroup([tab.id]); } catch { }
+      // Skip tabs still loading — their URL may be transitional
+      if (tab.status === "loading") continue;
+      try { await chrome.tabs.ungroup([tab.id]); } catch {}
     }
   }
 
+  // ── 7. Sort groups alphabetically ────────────────────────
+  // All groups are expanded at this point so moves are safe.
   await sortGroups(windowId);
 
+  // ── 8. Move active group to end (after sorting) ──────────
+  // Runs AFTER sort so sort cannot undo the final position.
+  if (moveActiveToEnd) {
+    const [activeTab] = await chrome.tabs.query({ windowId, active: true });
+    if (activeTab?.groupId && activeTab.groupId !== -1) {
+      await moveGroupToEnd(windowId, activeTab.groupId);
+    }
+  }
+
+  // ── 9. Collapse ───────────────────────────────────────────
+  // This is the ONLY place collapse happens. Everything above
+  // runs with groups expanded, so no move can ungroup a tab.
   if (autoCollapse) await collapseAllExceptActive(windowId);
 }
+
+// ── Sort ──────────────────────────────────────────────────────
 
 async function sortGroups(windowId) {
   const groups = await chrome.tabGroups.query({ windowId });
@@ -144,60 +189,55 @@ async function sortGroups(windowId) {
   let pos = pinned.length;
 
   for (const group of sorted) {
-    const groupTabs = (await chrome.tabs.query({ windowId, groupId: group.id }))
-      .sort((a, b) => a.index - b.index);
+    const groupTabs = await chrome.tabs.query({ windowId, groupId: group.id });
     if (groupTabs.length === 0) continue;
     try {
-      await chrome.tabs.move(groupTabs.map(t => t.id), { windowId, index: pos });
+      await chrome.tabGroups.move(group.id, { index: pos });
       pos += groupTabs.length;
-    } catch (err) { console.warn("[TabGroupOrganizer] sort move:", err); }
+    } catch (err) { console.warn("[TabGroupOrganizer] sortGroups:", err); }
   }
 }
 
-// â”€â”€ Feature: Auto Collapse â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Move group to end ─────────────────────────────────────────
+
+async function moveGroupToEnd(windowId, groupId) {
+  if (!groupId || groupId === -1) return;
+  try {
+    await chrome.tabGroups.move(groupId, { index: -1 });
+  } catch (err) { console.warn("[TabGroupOrganizer] moveGroupToEnd:", err); }
+}
+
+// ── Collapse helpers ──────────────────────────────────────────
 
 async function collapseAllExceptActive(windowId) {
   const [activeTab]   = await chrome.tabs.query({ windowId, active: true });
   const activeGroupId = activeTab?.groupId ?? -1;
   const groups        = await chrome.tabGroups.query({ windowId });
-
   for (const group of groups) {
     const shouldCollapse = (group.id !== activeGroupId);
     if (group.collapsed !== shouldCollapse) {
       try { await chrome.tabGroups.update(group.id, { collapsed: shouldCollapse }); }
-      catch { }
+      catch {}
     }
   }
 }
-
-// â”€â”€ Feature: Collapse / Expand All â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function setAllGroupsCollapsed(windowId, collapse) {
   const groups = await chrome.tabGroups.query({ windowId });
   for (const group of groups) {
     try { await chrome.tabGroups.update(group.id, { collapsed: collapse }); }
-    catch { }
+    catch {}
   }
 }
 
-// â”€â”€ Feature: Move Active Group to End â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-async function moveGroupToEnd(windowId, groupId) {
-  if (!groupId || groupId === -1) return;
-  const groupTabs = (await chrome.tabs.query({ windowId, groupId }))
-    .sort((a, b) => a.index - b.index);
-  if (groupTabs.length === 0) return;
-  try {
-    await chrome.tabs.move(groupTabs.map(t => t.id), { windowId, index: -1 });
-  } catch (err) { console.warn("[TabGroupOrganizer] moveGroupToEnd:", err); }
-}
-
-// â”€â”€ Tab event listeners â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Debounce ──────────────────────────────────────────────────
 
 function scheduleOrganize(delayMs = 800) {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(organizeTabs, delayMs);
 }
+
+// ── Tab event listeners ───────────────────────────────────────
 
 chrome.tabs.onCreated.addListener(() => scheduleOrganize());
 chrome.tabs.onUpdated.addListener((_id, changeInfo) => {
@@ -207,22 +247,54 @@ chrome.tabs.onRemoved.addListener(() => scheduleOrganize());
 chrome.tabs.onDetached.addListener(() => scheduleOrganize());
 chrome.tabs.onAttached.addListener(() => scheduleOrganize());
 
+// ── onActivated ───────────────────────────────────────────────
+// ★ KEY FIX: this handler no longer calls moveGroupToEnd directly.
+//
+// Previous design had two independent code paths both calling
+// moveGroupToEnd — one inside organizeWindow and one here.
+// They ran at different times and created race conditions where
+// tabs were moved while their group was still in a collapsed state,
+// causing Chrome to silently ungroup them.
+//
+// New design: a single pipeline in organizeWindow handles everything:
+//   expand → group → sort → move to end → collapse
+//
+// When moveActiveToEnd is ON, onActivated simply triggers that
+// pipeline via scheduleOrganize. When only autoCollapse is ON
+// (no tab changes occurred), we update collapse state directly.
+
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   if (activeMoveTimer) clearTimeout(activeMoveTimer);
+
   activeMoveTimer = setTimeout(async () => {
     try {
       const { moveActiveToEnd = false, autoCollapse = false } =
         await chrome.storage.sync.get(["moveActiveToEnd", "autoCollapse"]);
-      const tab = await chrome.tabs.get(tabId);
-      if (moveActiveToEnd && tab.groupId && tab.groupId !== -1) {
-        await moveGroupToEnd(windowId, tab.groupId);
+
+      if (moveActiveToEnd) {
+        // Route through the full organizeWindow pipeline.
+        // This guarantees groups are expanded before any moves,
+        // and moveGroupToEnd runs only after sortGroups completes.
+        scheduleOrganize(300);
+        return;
       }
-      if (autoCollapse) await collapseAllExceptActive(windowId);
+
+      if (autoCollapse) {
+        // moveActiveToEnd is off — no tab moves needed, just collapse.
+        // Wait for any in-progress organize to finish first.
+        let waited = 0;
+        while (isOrganizing && waited < 2000) {
+          await new Promise(r => setTimeout(r, 50));
+          waited += 50;
+        }
+        await collapseAllExceptActive(windowId);
+      }
+
     } catch (err) { console.warn("[TabGroupOrganizer] onActivated:", err); }
   }, 300);
 });
 
-// â”€â”€ Message handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Message handler ───────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
