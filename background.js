@@ -8,9 +8,20 @@ const GROUP_COLORS = [
 ];
 
 const SPECIAL_SCHEMES = [
-  "chrome://", "chrome-extension://", "edge://",
   "about:", "data:", "javascript:", "file://"
 ];
+
+const NEWTAB_URLS = [
+  "chrome://newtab", "chrome://new-tab-page", "edge://newtab"
+];
+
+function getSpecialGroupName(url) {
+  if (!url) return undefined;
+  if (NEWTAB_URLS.some(p => url.startsWith(p))) return "newtab";
+  if (url.startsWith("chrome-extension://") || url.startsWith("chrome://extensions")) return "extension";
+  if (url.startsWith("edge://extensions")) return "extension";
+  return undefined;
+}
 
 let isOrganizing    = false;
 let debounceTimer   = null;
@@ -18,9 +29,14 @@ let activeMoveTimer = null;
 
 // ── Helpers ──────────────────────────────────────────────────
 
+function isIPv4(hostname) {
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+}
+
 function getMainDomain(url) {
   try {
     const { hostname } = new URL(url);
+    if (isIPv4(hostname)) return hostname;
     const clean = hostname.replace(/^www\./, "");
     const parts = clean.split(".");
     const compoundTLDs = new Set([
@@ -33,7 +49,7 @@ function getMainDomain(url) {
       if (compoundTLDs.has(lastTwo)) return parts.slice(-3).join(".");
     }
     return parts.slice(-2).join(".");
-  } catch { return null; }
+  } catch { return undefined; }
 }
 
 function isSpecialUrl(url) {
@@ -87,6 +103,12 @@ async function organizeWindow(windowId) {
   const skipTabs  = [];
 
   for (const tab of tabs) {
+    const specialGroup = getSpecialGroupName(tab.url);
+    if (specialGroup) {
+      if (!domainMap.has(specialGroup)) domainMap.set(specialGroup, []);
+      domainMap.get(specialGroup).push(tab);
+      continue;
+    }
     if (isSpecialUrl(tab.url)) { skipTabs.push(tab); continue; }
     const domain = getMainDomain(tab.url);
     if (!domain || excludedDomains.includes(domain)) { skipTabs.push(tab); continue; }
